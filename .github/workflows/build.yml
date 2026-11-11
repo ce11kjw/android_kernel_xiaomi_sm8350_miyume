@@ -1,0 +1,108 @@
+name: Build HoshinoNeko Kernel (Star)
+
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: 'Device codename (star/venus/mars/haydn)'
+        required: true
+        default: 'star'
+      ksu_ref:
+        description: 'ReSukiSU git ref (empty = main latest)'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk/ndk /opt/ghc /usr/local/share/boost || true
+          df -h /
+
+      - name: Checkout kernel
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: false
+
+      - name: Init KernelSU submodule (latest)
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git submodule sync KernelSU || true
+          git submodule update --init KernelSU || echo "submodule init failed, will clone manually"
+          if [ ! -f KernelSU/kernel/Makefile ] && [ ! -f KernelSU/KernelSU/kernel/Makefile ]; then
+            echo "=== manual clone ==="
+            rm -rf KernelSU
+            git clone --depth 1 https://github.com/ReSukiSU/ReSukiSU.git KernelSU
+          fi
+          if [ -n "${{ github.event.inputs.ksu_ref }}" ]; then
+            cd KernelSU && git fetch --depth 1 origin "${{ github.event.inputs.ksu_ref }}" && git checkout FETCH_HEAD && cd ..
+          fi
+          echo "=== KernelSU commit ==="
+          (cd KernelSU && git log -1 --oneline)
+          ls KernelSU | head -20
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bc bison build-essential flex libssl-dev libelf-dev \
+            python3 git curl cpio kmod rsync zip unzip device-tree-compiler
+          echo "=== download clang 18 ==="
+          mkdir -p $HOME/tc
+          cd $HOME/tc
+          curl -sL --retry 3 -o clang.tar.gz "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main-kernel-2025/clang-r547379.tar.gz" || true
+          if [ ! -s clang.tar.gz ]; then
+            echo "fallback: use runner clang"
+            sudo apt-get install -y clang lld llvm
+          else
+            tar xzf clang.tar.gz
+            echo "$HOME/tc/bin" >> $GITHUB_PATH
+          fi
+
+      - name: Show compiler
+        run: |
+          which clang || true
+          clang --version || true
+          nproc
+
+      - name: Build kernel
+        run: |
+          DEV="${{ github.event.inputs.device }}"
+          [ -z "$DEV" ] && DEV=star
+          export PATH=$HOME/tc/bin:$PATH
+          export ARCH=arm64
+          export LLVM=1
+          export LLVM_IAS=1
+          echo "=== building $DEV ==="
+          make -j$(nproc) ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out_${DEV} ${DEV}_defconfig 2>&1 | tail -30
+          make -j$(nproc) ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out_${DEV} modules Image 2>&1 | tail -80
+
+      - name: Package AnyKernel3
+        run: |
+          DEV="${{ github.event.inputs.device }}"
+          [ -z "$DEV" ] && DEV=star
+          IMG="out_${DEV}/arch/arm64/boot/Image"
+          ls -lh "$IMG"
+          curl -sL -o ak3.zip "https://github.com/osm0sis/AnyKernel3/archive/refs/heads/master.zip"
+          unzip -q ak3.zip
+          AK=$(ls -d AnyKernel3-*)
+          cp "$IMG" "$AK/Image"
+          cd "$AK"
+          sed -i "s/^kernel.string=.*/kernel.string=HoshinoNeko Star (BakaSU latest)/" anykernel.sh || true
+          sed -i "s/^do.devicecheck=.*/do.devicecheck=0/" anykernel.sh || true
+          sed -i "s/^block=.*/block=boot;/" anykernel.sh || true
+          sed -i "s/^is_slot_device=.*/is_slot_device=1/" anykernel.sh || true
+          zip -r9 "../HoshinoNeko_${DEV}_BakaSU-latest_AnyKernel3.zip" * -x .git README.md
+          cd ..
+          ls -lh HoshinoNeko_${DEV}_BakaSU-latest_AnyKernel3.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ github.event.inputs.device }}
+          path: HoshinoNeko_*_AnyKernel3.zip
+          retention-days: 30
