@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       device:
-        description: 'Device codename (star/venus/mars/haydn)'
+        description: 'Device codename'
         required: true
         default: 'star'
       ksu_ref:
-        description: 'ReSukiSU git ref (empty = main latest)'
+        description: 'ReSukiSU ref (empty = main HEAD)'
         required: false
         default: ''
 
@@ -29,80 +29,89 @@ jobs:
           fetch-depth: 1
           submodules: false
 
-      - name: Init KernelSU submodule (latest)
+      - name: Update KernelSU to latest main
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git submodule sync KernelSU || true
-          git submodule update --init KernelSU || echo "submodule init failed, will clone manually"
-          if [ ! -f KernelSU/kernel/Makefile ] && [ ! -f KernelSU/KernelSU/kernel/Makefile ]; then
-            echo "=== manual clone ==="
-            rm -rf KernelSU
-            git clone --depth 1 https://github.com/ReSukiSU/ReSukiSU.git KernelSU
+          echo "=== 删除旧 submodule，克隆最新 ==="
+          rm -rf KernelSU
+          KREF="${{ github.event.inputs.ksu_ref }}"
+          if [ -z "$KREF" ]; then KREF="main"; fi
+          echo "ref=$KREF"
+          git clone --depth 50 https://github.com/ReSukiSU/ReSukiSU.git KernelSU
+          cd KernelSU
+          if [ "$KREF" != "main" ]; then
+            git fetch --depth 50 origin "$KREF" && git checkout FETCH_HEAD
           fi
-          if [ -n "${{ github.event.inputs.ksu_ref }}" ]; then
-            cd KernelSU && git fetch --depth 1 origin "${{ github.event.inputs.ksu_ref }}" && git checkout FETCH_HEAD && cd ..
-          fi
-          echo "=== KernelSU commit ==="
-          (cd KernelSU && git log -1 --oneline)
-          ls KernelSU | head -20
+          echo "=== 当前 commit ==="
+          git log -1 --format='%H %s'
+          echo "=== 检查结构 ==="
+          ls
+          if [ -d kernel ] && [ -f kernel/Makefile ]; then echo "结构OK: kernel/"; else echo "警告: kernel/ 不存在"; ls -la; fi
 
       - name: Install toolchain
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq bc bison build-essential flex libssl-dev libelf-dev \
             python3 git curl cpio kmod rsync zip unzip device-tree-compiler
-          echo "=== download clang 18 ==="
-          mkdir -p $HOME/tc
-          cd $HOME/tc
-          curl -sL --retry 3 -o clang.tar.gz "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main-kernel-2025/clang-r547379.tar.gz" || true
-          if [ ! -s clang.tar.gz ]; then
-            echo "fallback: use runner clang"
-            sudo apt-get install -y clang lld llvm
-          else
+          echo "=== clang 18 ==="
+          mkdir -p $HOME/tc && cd $HOME/tc
+          curl -sL --retry 3 -o clang.tar.gz "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main-kernel-2025/clang-r547379.tar.gz"
+          if [ -s clang.tar.gz ]; then
             tar xzf clang.tar.gz
             echo "$HOME/tc/bin" >> $GITHUB_PATH
+            echo "clang 已安装"
+          else
+            echo "下载失败，用系统 clang"
+            sudo apt-get install -y clang lld llvm
           fi
 
-      - name: Show compiler
+      - name: Verify compiler
         run: |
-          which clang || true
-          clang --version || true
-          nproc
+          which clang; clang --version | head -2
 
       - name: Build kernel
         run: |
           DEV="${{ github.event.inputs.device }}"
           [ -z "$DEV" ] && DEV=star
           export PATH=$HOME/tc/bin:$PATH
-          export ARCH=arm64
-          export LLVM=1
-          export LLVM_IAS=1
-          echo "=== building $DEV ==="
-          make -j$(nproc) ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out_${DEV} ${DEV}_defconfig 2>&1 | tail -30
-          make -j$(nproc) ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out_${DEV} modules Image 2>&1 | tail -80
+          echo "=== defconfig $DEV ==="
+          make -j$(nproc) ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out_${DEV} ${DEV}_defconfig 2>&1 | tail -20
+          echo "=== 编译 ==="
+          make -j$(nproc) ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out_${DEV} modules Image 2>&1 | tail -100
+
+      - name: Show kernel version
+        run: |
+          DEV="${{ github.event.inputs.device }}"
+          [ -z "$DEV" ] && DEV=star
+          IMG="out_${DEV}/arch/arm64/boot/Image"
+          ls -lh "$IMG"
+          strings "$IMG" | grep -m2 "Linux version 5"
+          echo "=== KSU 版本 ==="
+          strings "$IMG" | grep -oE "v4\.[0-9]+\.[0-9]+[a-z0-9@._-]*" | head -5
+          echo "=== SUSFS 版本 ==="
+          strings "$IMG" | grep -oE "susfs is initialized! version: v[0-9.]+" | head -2
 
       - name: Package AnyKernel3
         run: |
           DEV="${{ github.event.inputs.device }}"
           [ -z "$DEV" ] && DEV=star
           IMG="out_${DEV}/arch/arm64/boot/Image"
-          ls -lh "$IMG"
           curl -sL -o ak3.zip "https://github.com/osm0sis/AnyKernel3/archive/refs/heads/master.zip"
           unzip -q ak3.zip
           AK=$(ls -d AnyKernel3-*)
           cp "$IMG" "$AK/Image"
           cd "$AK"
-          sed -i "s/^kernel.string=.*/kernel.string=HoshinoNeko Star (BakaSU latest)/" anykernel.sh || true
+          sed -i "s/^kernel.string=.*/kernel.string=HoshinoNeko Star BakaSU/g" anykernel.sh || true
           sed -i "s/^do.devicecheck=.*/do.devicecheck=0/" anykernel.sh || true
           sed -i "s/^block=.*/block=boot;/" anykernel.sh || true
           sed -i "s/^is_slot_device=.*/is_slot_device=1/" anykernel.sh || true
-          zip -r9 "../HoshinoNeko_${DEV}_BakaSU-latest_AnyKernel3.zip" * -x .git README.md
+          zip -r9 "../HoshinoNeko_${DEV}_BakaSU_AnyKernel3.zip" * -x .git README.md
           cd ..
-          ls -lh HoshinoNeko_${DEV}_BakaSU-latest_AnyKernel3.zip
+          ls -lh HoshinoNeko_${DEV}_BakaSU_AnyKernel3.zip
 
-      - name: Upload artifact
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-${{ github.event.inputs.device }}
+          name: kernel-${{ github.event.inputs.device }}-${{ github.run_number }}
           path: HoshinoNeko_*_AnyKernel3.zip
           retention-days: 30
