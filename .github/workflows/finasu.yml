@@ -25,14 +25,6 @@ jobs:
           fetch-depth: 1
           submodules: false
 
-      - name: Clean ReSukiSU hooks
-        run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          curl -sL -o /tmp/clean_hooks2.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/clean_hooks2.py"
-          python3 /tmp/clean_hooks2.py
-          echo "--- remaining ---"
-          grep -rn "ksu_handle" fs/exec.c fs/open.c fs/stat.c fs/devpts/inode.c kernel/sys.c fs/read_write.c 2>/dev/null | head -5 || echo CLEAN
-
       - name: Setup FinaSU
         run: |
           rm -rf KernelSU
@@ -44,6 +36,14 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           bash /tmp/FinaSU/kernel/setup.sh --dir /tmp/FinaSU
           ls -l drivers/kernelsu | head -2
+
+      - name: Clean ReSukiSU hooks
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          curl -sL -o /tmp/clean_hooks3.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/clean_hooks3.py"
+          python3 /tmp/clean_hooks3.py
+          echo "--- remaining ---"
+          grep -rn "ksu_handle" fs/exec.c fs/open.c fs/stat.c fs/devpts/inode.c kernel/sys.c fs/read_write.c 2>/dev/null | head -5 || echo CLEAN
 
       - name: Install clang 18
         run: |
