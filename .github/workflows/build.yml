@@ -1,21 +1,16 @@
-name: Build FinaSU Kernel (star)
+name: Build FinaSU (verbose error)
 
 on:
   workflow_dispatch:
-    inputs:
-      device:
-        description: 'device'
-        required: true
-        default: 'star'
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 240
+    timeout-minutes: 120
 
     steps:
       - name: Free disk
-        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL || true; df -h /
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL || true
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,10 +23,7 @@ jobs:
           git submodule deinit -f KernelSU 2>/dev/null || true
           rm -rf .git/modules/KernelSU 2>/dev/null || true
           git clone --depth 1 https://github.com/LyraVoid/FinaSU.git /tmp/FinaSU
-          cd /tmp/FinaSU && git log -1 --format='%H'
-          cd "$GITHUB_WORKSPACE"
-          bash /tmp/FinaSU/kernel/setup.sh --dir /tmp/FinaSU 2>&1 | tail -8
-          ls -l drivers/kernelsu | head -2
+          bash /tmp/FinaSU/kernel/setup.sh --dir /tmp/FinaSU 2>&1 | tail -5
 
       - name: Install clang 18
         run: |
@@ -40,73 +32,34 @@ jobs:
           mkdir -p $HOME/tc && cd $HOME/tc
           wget -q --timeout=90 --tries=3 -O clang.tar.gz "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main-kernel-build-2024/clang-r510928.tar.gz"
           tar xzf clang.tar.gz
-          [ -x bin/clang ] && { echo "$HOME/tc/bin" >> $GITHUB_PATH; bin/clang --version | head -1; } || sudo apt-get install -y clang lld
+          [ -x bin/clang ] && echo "$HOME/tc/bin" >> $GITHUB_PATH
 
-      - name: Build (all in one)
+      - name: Defconfig
         run: |
-          DEV="${{ github.event.inputs.device }}"; [ -z "$DEV" ] && DEV=star
           export PATH=$HOME/tc/bin:$PATH
-          export ARCH=arm64 LLVM=1 LLVM_IAS=1
-          O=out_${DEV}
-
-          echo "=== 1. defconfig ==="
-          make -j$(nproc) O=$O ${DEV}_defconfig 2>&1 | tail -5
-
-          echo "=== 2. 启用 FinaSU 配置 ==="
-          CFG=$O/.config
+          make -j$(nproc) ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out_star star_defconfig 2>&1 | tail -3
+          CFG=out_star/.config
           for k in CONFIG_KSU CONFIG_KPROBES CONFIG_KALLSYMS_ALL CONFIG_EXT4_FS CONFIG_HEADERS_INSTALL CONFIG_THREAD_INFO_IN_TASK; do
             if grep -q "^${k}=" "$CFG"; then sed -i "s|^${k}=.*|${k}=y|" "$CFG";
             elif grep -q "^# ${k} is not set" "$CFG"; then sed -i "s|^# ${k} is not set|${k}=y|" "$CFG";
             else echo "${k}=y" >> "$CFG"; fi
           done
-          grep -E "^CONFIG_(KSU|KPROBES|KALLSYMS_ALL|EXT4_FS|HEADERS_INSTALL)=" "$CFG"
+          make -j$(nproc) ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out_star headers_install 2>&1 | tail -3
+          make -j$(nproc) ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out_star olddefconfig 2>&1 | tail -3
 
-          echo "=== 3. headers_install (默认路径 usr/) ==="
-          make -j$(nproc) O=$O headers_install 2>&1 | tail -10
-          echo "--- 检查 usr/include ---"
-          ls $O/usr/include/ 2>/dev/null | head -5
-          ls ./usr/include 2>/dev/null | head -5
-
-          echo "=== 4. 同步 config ==="
-          make -j$(nproc) O=$O olddefconfig 2>&1 | tail -5
-          grep -E "^CONFIG_KSU=" $O/.config
-
-          echo "=== 5. 编译内核 ==="
-          make -j$(nproc) O=$O \
+      - name: Build single-thread to catch error
+        run: |
+          export PATH=$HOME/tc/bin:$PATH
+          set +e
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out_star \
             KSU_REQUIRE_PREINIT=1 \
             KSU_EXPECTED_SIZE=0x2cc \
             KSU_EXPECTED_HASH=2d89b50aaf1db013c2b6738f973f48b62ea21a3a8d7216bfec3521065d448458 \
-            modules Image 2>&1 | tail -40
-
-          echo "=== 6. 检查产物 ==="
-          ls -lh $O/arch/arm64/boot/Image 2>/dev/null || echo "!!! Image 不存在"
-
-      - name: Package
-        run: |
-          DEV="${{ github.event.inputs.device }}"; [ -z "$DEV" ] && DEV=star
-          IMG="out_${DEV}/arch/arm64/boot/Image"
-          if [ ! -f "$IMG" ]; then echo "无 Image，跳过"; exit 1; fi
-          wget -q -O ak3.zip "https://github.com/osm0sis/AnyKernel3/archive/refs/heads/master.zip"
-          unzip -q ak3.zip
-          AK=$(ls -d AnyKernel3-*)
-          cp "$IMG" "$AK/Image"
-          cd "$AK"
-          sed -i "s/^kernel.string=.*/kernel.string=FinaSU Star/g" anykernel.sh || true
-          sed -i "s/^do.devicecheck=.*/do.devicecheck=0/" anykernel.sh || true
-          sed -i "s/^block=.*/block=boot;/" anykernel.sh || true
-          sed -i "s/^is_slot_device=.*/is_slot_device=1/" anykernel.sh || true
-          zip -r9 "../FinaSU_star_AK3.zip" * -x .git README.md
-          cd ..
-          ls -lh FinaSU_star_AK3.zip
-          echo "=== 版本 ==="
-          strings "$IMG" | grep -m1 "Linux version 5"
-          echo "FinaSU 特征: $(strings "$IMG" | grep -ic finasu)"
-
-      - name: Upload
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: finasu-star
-          path: FinaSU_star_AK3.zip
-          retention-days: 30
-          if-no-files-found: warn
+            modules Image > /tmp/build.log 2>&1
+          RC=$?
+          echo "=== exit code: $RC ==="
+          echo "=== 错误行 ==="
+          grep -nE "error:|Error [0-9]|Stop\.|No rule|undefined|fatal" /tmp/build.log | head -40
+          echo ""
+          echo "=== 最后 60 行 ==="
+          tail -60 /tmp/build.log
