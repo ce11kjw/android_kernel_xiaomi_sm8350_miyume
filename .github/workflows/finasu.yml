@@ -52,6 +52,9 @@ jobs:
           curl -sL -o /tmp/link54b.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/link54b.py"
           curl -sL -o /tmp/fix_commit2.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/fix_commit2.py"
           curl -sL -o /tmp/fix_lock.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/fix_lock.py"
+          curl -sL -o /tmp/fix_leak.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/fix_leak.py"
+          curl -sL -o /tmp/fix_uaf2.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/fix_uaf2.py"
+          curl -sL -o /tmp/fix_uaf3.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/fix_uaf3.py"
           curl -sL -o /tmp/selinux_access54.h "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/selinux_access54.h"
           echo "--- 文件确认 ---"
           ls -l /tmp/patch54.py /tmp/seccomp_cache_54.c
