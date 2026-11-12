@@ -47,6 +47,7 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           echo "=== 下载补丁脚本 ==="
           curl -sL -o /tmp/patch54_v2.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/patch54_v2.py"
+          curl -sL -o /tmp/unwrap_v5.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/unwrap_v5.py"
           curl -sL -o /tmp/seccomp_cache_54.c "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/seccomp_cache_54.c"
           curl -sL -o /tmp/pkg_observer_54.c "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/pkg_observer_54.c"
           curl -sL -o /tmp/selinux54d.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/selinux54d.py"
@@ -63,7 +64,10 @@ jobs:
           curl -sL -o /tmp/fix_sysread.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/fix_sysread.py"
           ls -1 /tmp/*.py /tmp/*.c /tmp/*.h
           echo ""
-          echo "=== 执行补丁 ==="
+          echo "=== 内核侧 hook 清理 ==="
+          python3 /tmp/unwrap_v5.py .
+          echo ""
+          echo "=== FinaSU 5.4 移植 ==="
           python3 /tmp/patch54_v2.py
 
       - name: Install clang 18
