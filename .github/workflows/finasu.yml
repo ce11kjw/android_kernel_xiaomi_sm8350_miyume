@@ -27,6 +27,7 @@ jobs:
 
       - name: Setup FinaSU
         run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           rm -rf KernelSU
           git submodule deinit -f KernelSU 2>/dev/null || true
           rm -rf .git/modules/KernelSU 2>/dev/null || true
@@ -37,13 +38,23 @@ jobs:
           bash /tmp/FinaSU/kernel/setup.sh --dir /tmp/FinaSU
           ls -l drivers/kernelsu | head -2
 
-      - name: Clean ReSukiSU hooks
+      - name: Apply patches
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          curl -sL -o /tmp/clean_hooks5.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/clean_hooks5.py"
-          python3 /tmp/clean_hooks5.py
-          echo "--- remaining ---"
-          grep -rn "ksu_handle" fs/exec.c fs/open.c fs/stat.c fs/devpts/inode.c kernel/sys.c fs/read_write.c 2>/dev/null | head -5 || echo CLEAN
+          echo "=== 下载补丁脚本 ==="
+          curl -sL -o /tmp/clean_hooks6.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/clean_hooks6.py"
+          curl -sL -o /tmp/seccomp_cache_54.c "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/seccomp_cache_54.c"
+          echo "--- 文件确认 ---"
+          ls -l /tmp/clean_hooks6.py /tmp/seccomp_cache_54.c
+          head -3 /tmp/seccomp_cache_54.c
+          echo ""
+          echo "=== 执行补丁 ==="
+          python3 /tmp/clean_hooks6.py
+          echo ""
+          echo "=== 验证 seccomp_cache.c ==="
+          FIN_REAL=$(readlink -f drivers/kernelsu)
+          echo "FinaSU real path: $FIN_REAL"
+          head -8 "$FIN_REAL/infra/seccomp_cache.c"
 
       - name: Install clang 18
         run: |
@@ -58,29 +69,18 @@ jobs:
             bin/clang --version | head -1
           fi
 
-      - name: Defconfig + headers to source usr/
+      - name: Defconfig + headers
         run: |
           DEV="${{ github.event.inputs.device }}"
           if [ -z "$DEV" ]; then DEV=star; fi
           export PATH="$HOME/tc/bin:$PATH"
           O="out_${DEV}"
-
-          echo "=== defconfig ==="
           make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 O="$O" "${DEV}_defconfig" 2>&1 | tail -6
-
-          echo "=== 补 KPROBES ==="
           ./scripts/config --file "$O/.config" --enable KPROBES
           make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 O="$O" olddefconfig 2>&1 | tail -2
-
-          echo "=== 配置确认 ==="
           grep -E "^CONFIG_(KSU|KPROBES|KALLSYMS_ALL|EXT4_FS|HEADERS_INSTALL)=" "$O/.config"
-
-          echo "=== headers_install -> 源码根 usr/include ==="
-          make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 O="$O" headers_install INSTALL_HDR_PATH="$(pwd)/usr" 2>&1 | tail -6
-
-          echo "=== 验证源码根 usr/include ==="
-          ls usr/include 2>/dev/null | head -8
-          echo "文件数: $(find usr/include -type f 2>/dev/null | wc -l)"
+          make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 O="$O" headers_install INSTALL_HDR_PATH="$(pwd)/usr" 2>&1 | tail -4
+          echo "usr/include 文件数: $(find usr/include -type f 2>/dev/null | wc -l)"
 
       - name: Build
         run: |
@@ -88,21 +88,14 @@ jobs:
           if [ -z "$DEV" ]; then DEV=star; fi
           export PATH="$HOME/tc/bin:$PATH"
           O="out_${DEV}"
-          echo "=== usr/include 确认 ==="
-          echo "文件数: $(find usr/include -type f 2>/dev/null | wc -l)"
-          echo ""
-          echo "=== build ==="
           set +e
           make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 O="$O" KSU_REQUIRE_PREINIT=1 modules Image > /tmp/build.log 2>&1
           RC=$?
           echo "exit=$RC"
-          echo "=== 错误 ==="
-          grep -E "error:|Error [0-9]|Stop\.|No rule|undefined" /tmp/build.log | head -20
+          grep -E "error:|Error [0-9]|Stop\.|undeclared|undefined" /tmp/build.log | head -20
           echo ""
-          echo "=== 末尾 30 行 ==="
-          tail -30 /tmp/build.log
+          tail -25 /tmp/build.log
           echo ""
-          echo "=== 产物 ==="
           ls -lh "$O/arch/arm64/boot/Image" 2>/dev/null || echo NO_IMAGE
 
       - name: Package
@@ -112,7 +105,6 @@ jobs:
           if [ -z "$DEV" ]; then DEV=star; fi
           IMG="out_${DEV}/arch/arm64/boot/Image"
           if [ ! -f "$IMG" ]; then echo "NO_IMAGE"; exit 0; fi
-          echo "=== 内核信息 ==="
           ls -lh "$IMG"
           strings "$IMG" | grep -m1 "Linux version 5"
           echo "FinaSU: $(strings "$IMG" | grep -ic finasu)"
