@@ -46,6 +46,7 @@ jobs:
           curl -sL -o /tmp/seccomp_cache_54.c "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/seccomp_cache_54.c"
           curl -sL -o /tmp/pkg_observer_54.c "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/pkg_observer_54.c"
           curl -sL -o /tmp/selinux54d.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/selinux54d.py"
+          curl -sL -o /tmp/fntrans54.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/fntrans54.py"
           echo "--- 文件确认 ---"
           ls -l /tmp/patch54.py /tmp/seccomp_cache_54.c
           head -3 /tmp/seccomp_cache_54.c
