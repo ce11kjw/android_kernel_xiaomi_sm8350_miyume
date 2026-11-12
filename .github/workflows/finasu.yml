@@ -46,7 +46,7 @@ jobs:
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           echo "=== 下载补丁脚本 ==="
-          curl -sL -o /tmp/patch54.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/patch54.py"
+          curl -sL -o /tmp/patch54_v2.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/patch54_v2.py"
           curl -sL -o /tmp/seccomp_cache_54.c "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/seccomp_cache_54.c"
           curl -sL -o /tmp/pkg_observer_54.c "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/pkg_observer_54.c"
           curl -sL -o /tmp/selinux54d.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/selinux54d.py"
@@ -60,10 +60,11 @@ jobs:
           curl -sL -o /tmp/fix_uaf3.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/fix_uaf3.py"
           curl -sL -o /tmp/sidtab54.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/sidtab54.py"
           curl -sL -o /tmp/link54b.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/link54b.py"
+          curl -sL -o /tmp/fix_sysread.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/fix_sysread.py"
           ls -1 /tmp/*.py /tmp/*.c /tmp/*.h
           echo ""
           echo "=== 执行补丁 ==="
-          python3 /tmp/patch54.py
+          python3 /tmp/patch54_v2.py
 
       - name: Install clang 18
         run: |
