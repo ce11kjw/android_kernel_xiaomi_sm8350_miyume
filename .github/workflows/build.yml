@@ -1,65 +1,106 @@
-name: Build FinaSU (verbose error)
+name: Build like author (exact method)
 
 on:
   workflow_dispatch:
+    inputs:
+      device:
+        description: 'device'
+        required: true
+        default: 'star'
+      ksu_ref:
+        description: 'KernelSU ref (empty=submodule pinned)'
+        required: false
+        default: ''
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
+    timeout-minutes: 180
 
     steps:
       - name: Free disk
         run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL || true
 
-      - name: Checkout
+      - name: Checkout with submodules
         uses: actions/checkout@v4
-        with: { fetch-depth: 1, submodules: false }
+        with:
+          fetch-depth: 1
+          submodules: recursive
 
-      - name: Setup FinaSU
+      - name: Verify KernelSU
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          rm -rf KernelSU
-          git submodule deinit -f KernelSU 2>/dev/null || true
-          rm -rf .git/modules/KernelSU 2>/dev/null || true
-          git clone --depth 1 https://github.com/LyraVoid/FinaSU.git /tmp/FinaSU
-          bash /tmp/FinaSU/kernel/setup.sh --dir /tmp/FinaSU 2>&1 | tail -5
+          echo "=== .gitmodules ==="
+          cat .gitmodules
+          echo "=== KernelSU 内容 ==="
+          ls KernelSU | head -10
+          cd KernelSU && git log -1 --format='%H %s' 2>/dev/null || echo "no git info"
+          cd ..
+          echo "=== 如果用户指定了 ref，切换 ==="
+          if [ -n "${{ github.event.inputs.ksu_ref }}" ]; then
+            cd KernelSU
+            git fetch --depth 50 origin "${{ github.event.inputs.ksu_ref }}" && git checkout FETCH_HEAD
+            git log -1 --format='%H %s'
+          fi
 
-      - name: Install clang 18
+      - name: Install clang 18.1.8 (exact author version)
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq bc bison build-essential flex libssl-dev libelf-dev python3 curl cpio kmod rsync zip unzip device-tree-compiler wget
           mkdir -p $HOME/tc && cd $HOME/tc
+          # 作者用 clang 18.1.8 Ubuntu 版，这里用 AOSP r510928 (18.0.0) 最接近
           wget -q --timeout=90 --tries=3 -O clang.tar.gz "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main-kernel-build-2024/clang-r510928.tar.gz"
           tar xzf clang.tar.gz
           [ -x bin/clang ] && echo "$HOME/tc/bin" >> $GITHUB_PATH
+          echo "=== 也装系统 clang-18 作备选 ==="
+          sudo apt-get install -y -qq clang-18 lld-18 2>/dev/null || sudo apt-get install -y -qq clang lld
 
-      - name: Defconfig
+      - name: Build (EXACTLY like build_device.sh)
         run: |
+          DEV="${{ github.event.inputs.device }}"; [ -z "$DEV" ] && DEV=star
           export PATH=$HOME/tc/bin:$PATH
-          make -j$(nproc) ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out_star star_defconfig 2>&1 | tail -3
-          CFG=out_star/.config
-          for k in CONFIG_KSU CONFIG_KPROBES CONFIG_KALLSYMS_ALL CONFIG_EXT4_FS CONFIG_HEADERS_INSTALL CONFIG_THREAD_INFO_IN_TASK; do
-            if grep -q "^${k}=" "$CFG"; then sed -i "s|^${k}=.*|${k}=y|" "$CFG";
-            elif grep -q "^# ${k} is not set" "$CFG"; then sed -i "s|^# ${k} is not set|${k}=y|" "$CFG";
-            else echo "${k}=y" >> "$CFG"; fi
-          done
-          make -j$(nproc) ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out_star headers_install 2>&1 | tail -3
-          make -j$(nproc) ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out_star olddefconfig 2>&1 | tail -3
-
-      - name: Build single-thread to catch error
-        run: |
-          export PATH=$HOME/tc/bin:$PATH
-          set +e
-          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out_star \
-            KSU_REQUIRE_PREINIT=1 \
-            KSU_EXPECTED_SIZE=0x2cc \
-            KSU_EXPECTED_HASH=2d89b50aaf1db013c2b6738f973f48b62ea21a3a8d7216bfec3521065d448458 \
-            modules Image > /tmp/build.log 2>&1
-          RC=$?
-          echo "=== exit code: $RC ==="
-          echo "=== 错误行 ==="
-          grep -nE "error:|Error [0-9]|Stop\.|No rule|undefined|fatal" /tmp/build.log | head -40
+          echo "=== clang ==="
+          which clang; clang --version | head -2
           echo ""
-          echo "=== 最后 60 行 ==="
-          tail -60 /tmp/build.log
+          echo "=== 完全按作者脚本，无额外参数 ==="
+          make -j$(nproc) ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out_${DEV} ${DEV}_defconfig 2>&1 | tail -10
+          make -j$(nproc) ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out_${DEV} modules Image 2>&1 | tail -40
+          echo ""
+          echo "=== 检查产物 ==="
+          ls -lh out_${DEV}/arch/arm64/boot/Image 2>/dev/null || echo "!!! 无 Image"
+
+      - name: Verify
+        run: |
+          DEV="${{ github.event.inputs.device }}"; [ -z "$DEV" ] && DEV=star
+          IMG="out_${DEV}/arch/arm64/boot/Image"
+          ls -lh "$IMG"
+          strings "$IMG" | grep -m1 "Linux version 5"
+          echo "KSU: $(strings "$IMG" | grep -oE 'v4\.[0-9]+\.[0-9]+[a-z0-9@._-]*' | head -1)"
+          echo "SUSFS: $(strings "$IMG" | grep -oE 'susfs is initialized! version: v[0-9.]+' | head -1)"
+          echo ""
+          echo "=== 对比作者 Stable5 ==="
+          echo "作者: 5.4.302-HoshinoNeko-gdaf8a641 / v4.2.0-rc1-a9216b04 / SUSFS v2.3.0"
+
+      - name: Package
+        run: |
+          DEV="${{ github.event.inputs.device }}"; [ -z "$DEV" ] && DEV=star
+          IMG="out_${DEV}/arch/arm64/boot/Image"
+          wget -q -O ak3.zip "https://github.com/osm0sis/AnyKernel3/archive/refs/heads/master.zip"
+          unzip -q ak3.zip
+          AK=$(ls -d AnyKernel3-*)
+          cp "$IMG" "$AK/Image"
+          cd "$AK"
+          sed -i "s/^kernel.string=.*/kernel.string=HN-Star-author-method/g" anykernel.sh || true
+          sed -i "s/^do.devicecheck=.*/do.devicecheck=0/" anykernel.sh || true
+          sed -i "s/^block=.*/block=boot;/" anykernel.sh || true
+          sed -i "s/^is_slot_device=.*/is_slot_device=1/" anykernel.sh || true
+          zip -r9 "../HN_star_author_AK3.zip" * -x .git README.md
+          cd ..
+          ls -lh HN_star_author_AK3.zip
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: hn-star-author
+          path: HN_star_author_AK3.zip
+          retention-days: 30
