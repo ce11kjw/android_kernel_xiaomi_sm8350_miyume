@@ -1,4 +1,4 @@
-name: Build FinaSU
+name: Build FinaSU (merged)
 
 on:
   workflow_dispatch:
@@ -8,14 +8,18 @@ on:
         required: true
         default: 'star'
       enable_susfs:
-        description: 'enable SUSFS (1=yes 0=no)'
+        description: '1=SUSFS on, 0=off'
         required: true
         default: '1'
+      enable_preinit:
+        description: '1=preinit on (risk), 0=off (safe)'
+        required: true
+        default: '0'
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 200
+    timeout-minutes: 240
 
     steps:
       - name: Free disk
@@ -36,39 +40,34 @@ jobs:
           git submodule deinit -f KernelSU 2>/dev/null || true
           rm -rf .git/modules/KernelSU 2>/dev/null || true
           git clone --depth 50 https://github.com/LyraVoid/FinaSU.git /tmp/FinaSU
-          cd /tmp/FinaSU
-          git log -1 --format='%H %s'
+          cd /tmp/FinaSU && git log -1 --format='%H %s'
           cd "$GITHUB_WORKSPACE"
           bash /tmp/FinaSU/kernel/setup.sh --dir /tmp/FinaSU
           ls -l drivers/kernelsu | head -2
 
-      - name: Apply patches
+      - name: Apply merged 5.4 patches
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          echo "=== 下载补丁脚本 ==="
-          curl -sL -o /tmp/patch54_v2.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/patch54_v2.py"
-          curl -sL -o /tmp/unwrap_v6.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/unwrap_v6.py"
-          curl -sL -o /tmp/seccomp_cache_54.c "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/seccomp_cache_54.c"
-          curl -sL -o /tmp/pkg_observer_54.c "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/pkg_observer_54.c"
-          curl -sL -o /tmp/selinux54d.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/selinux54d.py"
-          curl -sL -o /tmp/fntrans54.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/fntrans54.py"
-          curl -sL -o /tmp/hide54.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/hide54.py"
-          curl -sL -o /tmp/selinux_access54.h "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/selinux_access54.h"
-          curl -sL -o /tmp/fix_commit2.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/fix_commit2.py"
-          curl -sL -o /tmp/fix_lock.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/fix_lock.py"
-          curl -sL -o /tmp/fix_leak.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/fix_leak.py"
-          curl -sL -o /tmp/fix_uaf2.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/fix_uaf2.py"
-          curl -sL -o /tmp/fix_uaf3.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/fix_uaf3.py"
-          curl -sL -o /tmp/sidtab54.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/sidtab54.py"
-          curl -sL -o /tmp/link54b.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/link54b.py"
-          curl -sL -o /tmp/fix_sysread.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/fix_sysread.py"
-          ls -1 /tmp/*.py /tmp/*.c /tmp/*.h
+          H="https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main"
+          echo "=== 下载融合脚本 ==="
+          for f in ksu54-merge-p1.sh ksu54-merge-p2.sh ksu54-merge-p3.sh \
+                   patch_selinux54.py patch_sepolicy54.py patch_kbuild54.py; do
+            curl -sL -o "/tmp/$f" "$H/$f"
+            printf "  %-28s %s bytes\n" "$f" "$(stat -c%s /tmp/$f)"
+          done
           echo ""
-          echo "=== 内核侧 hook 清理 ==="
-          python3 /tmp/unwrap_v6.py .
+          echo "=== P1 ==="
+          bash /tmp/ksu54-merge-p1.sh "$GITHUB_WORKSPACE"
           echo ""
-          echo "=== FinaSU 5.4 移植 ==="
-          python3 /tmp/patch54_v2.py
+          echo "=== P2 ==="
+          bash /tmp/ksu54-merge-p2.sh "$GITHUB_WORKSPACE"
+          echo ""
+          echo "=== P3 ==="
+          if [ "${{ github.event.inputs.enable_preinit }}" = "1" ]; then
+            KSU54_ENABLE_PREINIT=1 bash /tmp/ksu54-merge-p3.sh "$GITHUB_WORKSPACE"
+          else
+            bash /tmp/ksu54-merge-p3.sh "$GITHUB_WORKSPACE"
+          fi
 
       - name: Install clang 18
         run: |
@@ -76,83 +75,59 @@ jobs:
           sudo apt-get install -y -qq bc bison build-essential flex libssl-dev libelf-dev python3 curl cpio kmod rsync zip unzip device-tree-compiler wget
           mkdir -p "$HOME/tc"
           cd "$HOME/tc"
-          wget -q --timeout=90 --tries=3 -O clang.tar.gz "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main-kernel-build-2024/clang-r510928.tar.gz"
+          wget -q --timeout=120 --tries=3 -O clang.tar.gz "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main-kernel-build-2024/clang-r510928.tar.gz"
           tar xzf clang.tar.gz
           if [ -x bin/clang ]; then echo "$HOME/tc/bin" >> "$GITHUB_PATH"; bin/clang --version | head -1; fi
 
       - name: Defconfig + SUSFS + headers
         run: |
           DEV="${{ github.event.inputs.device }}"
-          if [ -z "$DEV" ]; then DEV=star; fi
+          [ -z "$DEV" ] && DEV=star
           SUSFS="${{ github.event.inputs.enable_susfs }}"
           export PATH="$HOME/tc/bin:$PATH"
           O="out_${DEV}"
           CFG="$O/.config"
 
-          echo "=== 1. defconfig ==="
-          make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 O="$O" "${DEV}_defconfig" 2>&1 | tail -6
+          make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 O="$O" "${DEV}_defconfig" 2>&1 | tail -5
 
-          echo ""
-          echo "=== 2. defconfig 自带的 SUSFS 配置 ==="
-          grep -E "CONFIG_KSU" "$CFG" | head -20
-
-          echo ""
-          echo "=== 3. 显式启用必需项 ==="
           ./scripts/config --file "$CFG" \
             --enable KSU --enable KPROBES --enable KALLSYMS_ALL \
             --enable EXT4_FS --enable HEADERS_INSTALL --enable THREAD_INFO_IN_TASK
 
           if [ "$SUSFS" = "1" ]; then
-            echo "--- 启用 SUSFS 全套 ---"
             ./scripts/config --file "$CFG" \
-              --enable KSU_SUSFS \
-              --enable KSU_SUSFS_SUS_PATH \
-              --enable KSU_SUSFS_SUS_MOUNT \
-              --enable KSU_SUSFS_SUS_KSTAT \
-              --enable KSU_SUSFS_SPOOF_UNAME \
-              --enable KSU_SUSFS_ENABLE_LOG \
+              --enable KSU_SUSFS --enable KSU_SUSFS_SUS_PATH \
+              --enable KSU_SUSFS_SUS_MOUNT --enable KSU_SUSFS_SUS_KSTAT \
+              --enable KSU_SUSFS_SPOOF_UNAME --enable KSU_SUSFS_ENABLE_LOG \
               --enable KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
               --enable KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
-              --enable KSU_SUSFS_OPEN_REDIRECT \
-              --enable KSU_SUSFS_SUS_MAP
-          else
-            echo "--- 禁用 SUSFS ---"
-            ./scripts/config --file "$CFG" --disable KSU_SUSFS
+              --enable KSU_SUSFS_OPEN_REDIRECT --enable KSU_SUSFS_SUS_MAP
           fi
 
-          echo ""
-          echo "=== 4. olddefconfig ==="
-          make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 O="$O" olddefconfig 2>&1 | tail -3
+          make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 O="$O" olddefconfig 2>&1 | tail -2
 
-          echo ""
-          echo "=== 5. 最终配置确认（关键）==="
-          echo "--- KSU 核心 ---"
-          grep -E "^CONFIG_KSU=|^CONFIG_THREAD_INFO_IN_TASK=|^CONFIG_KPROBES=" "$CFG" || echo "  (缺)"
-          echo "--- SUSFS ---"
-          grep -E "^CONFIG_KSU_SUSFS" "$CFG" || echo "  ❌ SUSFS 未启用"
-          echo "--- 其他必需 ---"
-          grep -E "^CONFIG_(KALLSYMS_ALL|EXT4_FS|HEADERS_INSTALL)=" "$CFG"
+          echo "=== 配置 ==="
+          grep -E "^CONFIG_KSU=|^CONFIG_THREAD_INFO_IN_TASK=|^CONFIG_KPROBES=" "$CFG" || echo "MISS"
+          grep -E "^CONFIG_KSU_SUSFS" "$CFG" || echo "SUSFS OFF"
 
-          echo ""
-          echo "=== 6. headers_install ==="
-          make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 O="$O" headers_install INSTALL_HDR_PATH="$(pwd)/usr" 2>&1 | tail -4
-          echo "usr/include 文件数: $(find usr/include -type f 2>/dev/null | wc -l)"
+          make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 O="$O" headers_install INSTALL_HDR_PATH="$(pwd)/usr" 2>&1 | tail -3
+          echo "usr/include: $(find usr/include -type f 2>/dev/null | wc -l)"
 
       - name: Build
         run: |
           DEV="${{ github.event.inputs.device }}"
-          if [ -z "$DEV" ]; then DEV=star; fi
+          [ -z "$DEV" ] && DEV=star
           export PATH="$HOME/tc/bin:$PATH"
           O="out_${DEV}"
           set +e
           make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 O="$O" KSU_REQUIRE_PREINIT=1 modules Image > /tmp/build.log 2>&1
           RC=$?
           echo "exit=$RC"
-          echo "=== 错误 ==="
-          grep -E "error:|Error [0-9]|Stop\.|undeclared|undefined|No such" /tmp/build.log | head -25
+          echo "=== errors ==="
+          grep -E "error:|Error [0-9]|Stop\.|undeclared|undefined|No such" /tmp/build.log | head -30
           echo ""
-          echo "=== 末尾 20 行 ==="
-          tail -20 /tmp/build.log
+          echo "=== tail ==="
+          tail -15 /tmp/build.log
           echo ""
           ls -lh "$O/arch/arm64/boot/Image" 2>/dev/null || echo NO_IMAGE
 
@@ -160,33 +135,36 @@ jobs:
         if: always()
         run: |
           DEV="${{ github.event.inputs.device }}"
-          if [ -z "$DEV" ]; then DEV=star; fi
+          [ -z "$DEV" ] && DEV=star
           IMG="out_${DEV}/arch/arm64/boot/Image"
-          if [ ! -f "$IMG" ]; then echo "NO_IMAGE"; exit 0; fi
-          echo "=== 内核信息 ==="
+          [ -f "$IMG" ] || { echo NO_IMAGE; exit 0; }
+          echo "=== Image ==="
           ls -lh "$IMG"
           strings "$IMG" | grep -m1 "Linux version 5"
-          echo "FinaSU 特征: $(strings "$IMG" | grep -ic finasu)"
-          echo "SUSFS 特征: $(strings "$IMG" | grep -ic susfs)"
+          echo "SUSFS strings: $(strings "$IMG" | grep -ic susfs)"
+          echo "preinit strings: $(strings "$IMG" | grep -ic preinit)"
           echo ""
           wget -q -O ak3.zip "https://github.com/osm0sis/AnyKernel3/archive/refs/heads/master.zip"
           unzip -q ak3.zip
           AK=$(ls -d AnyKernel3-*)
           cp "$IMG" "$AK/Image"
           cd "$AK"
-          sed -i 's/^kernel.string=.*/kernel.string=FinaSU-Star-SUSFS/' anykernel.sh
-          sed -i 's/^do.devicecheck=.*/do.devicecheck=0/' anykernel.sh
+          sed -i 's/^kernel.string=.*/kernel.string=FinaSU-Star-5.4-merged/' anykernel.sh
+          sed -i 's/^do.devicecheck=.*/do.devicecheck=1/' anykernel.sh
+          sed -i 's/^device.name1=.*/device.name1=star/' anykernel.sh
           sed -i 's/^block=.*/block=boot;/' anykernel.sh
           sed -i 's/^is_slot_device=.*/is_slot_device=1/' anykernel.sh
-          zip -r9 ../FinaSU_star_AK3.zip . -x ".git/*" "README.md"
+          sed -i 's/^do.modules=.*/do.modules=0/' anykernel.sh
+          sed -i 's/^do.systemless=.*/do.systemless=1/' anykernel.sh
+          zip -r9 ../FinaSU_star_merged.zip . -x ".git/*" "README.md"
           cd ..
-          ls -lh FinaSU_star_AK3.zip
+          ls -lh FinaSU_star_merged.zip
 
       - name: Upload
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: finasu-star
-          path: FinaSU_star_AK3.zip
+          name: finasu-merged
+          path: FinaSU_star_merged.zip
           retention-days: 30
           if-no-files-found: warn
