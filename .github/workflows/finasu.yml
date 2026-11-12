@@ -28,8 +28,8 @@ jobs:
       - name: Clean ReSukiSU hooks
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          curl -sL -o /tmp/clean_hooks.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/clean_hooks.py"
-          python3 /tmp/clean_hooks.py
+          curl -sL -o /tmp/clean_hooks2.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/clean_hooks2.py"
+          python3 /tmp/clean_hooks2.py
           echo "--- remaining ---"
           grep -rn "ksu_handle" fs/exec.c fs/open.c fs/stat.c fs/devpts/inode.c kernel/sys.c fs/read_write.c 2>/dev/null | head -5 || echo CLEAN
 
