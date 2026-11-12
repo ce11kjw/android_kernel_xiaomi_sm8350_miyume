@@ -30,8 +30,8 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           curl -sL -o /tmp/clean_hooks.py "https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main/clean_hooks.py"
           python3 /tmp/clean_hooks.py
-          echo "--- 剩余 ksu_handle ---"
-          grep -rn "ksu_handle" fs/exec.c fs/open.c fs/stat.c fs/devpts/inode.c kernel/sys.c fs/read_write.c 2>/dev/null | head -10 || echo "清理干净"
+          echo "--- remaining ksu_handle ---"
+          grep -rn "ksu_handle" fs/exec.c fs/open.c fs/stat.c fs/devpts/inode.c kernel/sys.c fs/read_write.c 2>/dev/null | head -10 || echo CLEAN
 
       - name: Setup FinaSU
         run: |
@@ -58,30 +58,37 @@ jobs:
             bin/clang --version | head -1
           fi
 
+      - name: Defconfig + KPROBES
+        run: |
+          DEV="${{ github.event.inputs.device }}"
+          if [ -z "$DEV" ]; then DEV=star; fi
+          export PATH="$HOME/tc/bin:$PATH"
+          O="out_${DEV}"
+
+          echo "=== defconfig ==="
+          make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 O="$O" "${DEV}_defconfig" 2>&1 | tail -8
+
+          echo "=== 检查关键配置 ==="
+          grep -E "^CONFIG_(KSU|KPROBES|KALLSYMS_ALL|EXT4_FS|HEADERS_INSTALL)=" "$O/.config"
+
+          echo "=== 补 KPROBES（用源码树的 scripts/config）==="
+          ./scripts/config --file "$O/.config" --enable KPROBES
+          make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 O="$O" olddefconfig 2>&1 | tail -3
+
+          echo "=== 最终配置 ==="
+          grep -E "^CONFIG_(KSU|KPROBES|KALLSYMS_ALL|EXT4_FS|HEADERS_INSTALL)=" "$O/.config"
+
       - name: Build
         run: |
           DEV="${{ github.event.inputs.device }}"
           if [ -z "$DEV" ]; then DEV=star; fi
           export PATH="$HOME/tc/bin:$PATH"
           O="out_${DEV}"
-          CFG="$O/.config"
-
-          echo "=== defconfig ==="
-          make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 O="$O" "${DEV}_defconfig" 2>&1 | tail -8
-
-          echo "=== enable KSU configs ==="
-          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O="$O" scripts 2>&1 | tail -2
-          "$O/scripts/config" --file "$CFG" --enable KSU --enable KPROBES --enable KALLSYMS_ALL --enable EXT4_FS --enable HEADERS_INSTALL --enable THREAD_INFO_IN_TASK
-          make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 O="$O" olddefconfig 2>&1 | tail -3
-
-          echo "=== final config ==="
-          grep -E "^CONFIG_KSU=|^CONFIG_KSU_HOOK|^CONFIG_HEADERS_INSTALL=" "$CFG"
-
           echo "=== build ==="
-          make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 O="$O" KSU_REQUIRE_PREINIT=1 modules Image 2>&1 | tail -45
-
+          make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 O="$O" KSU_REQUIRE_PREINIT=1 modules Image 2>&1 | tail -50
+          echo ""
           echo "=== artifact ==="
-          ls -lh "$O/arch/arm64/boot/Image" 2>/dev/null || echo "NO_IMAGE"
+          ls -lh "$O/arch/arm64/boot/Image" 2>/dev/null || echo NO_IMAGE
 
       - name: Package
         if: always()
@@ -90,8 +97,9 @@ jobs:
           if [ -z "$DEV" ]; then DEV=star; fi
           IMG="out_${DEV}/arch/arm64/boot/Image"
           if [ ! -f "$IMG" ]; then echo "no image"; exit 0; fi
+          echo "=== 内核信息 ==="
           strings "$IMG" | grep -m1 "Linux version 5"
-          strings "$IMG" | grep -ic finasu
+          echo "FinaSU features: $(strings "$IMG" | grep -ic finasu)"
           wget -q -O ak3.zip "https://github.com/osm0sis/AnyKernel3/archive/refs/heads/master.zip"
           unzip -q ak3.zip
           AK=$(ls -d AnyKernel3-*)
