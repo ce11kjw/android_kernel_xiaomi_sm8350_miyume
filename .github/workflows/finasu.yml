@@ -1,0 +1,209 @@
+name: Build FinaSU Kernel (clean hooks)
+
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: 'device'
+        required: true
+        default: 'star'
+      finasu_ref:
+        description: 'FinaSU ref (empty=master)'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 200
+
+    steps:
+      - name: Free disk
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL || true; df -h /
+
+      - name: Checkout kernel (no submodules)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: false
+
+      - name: Clean ReSukiSU hooks
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          python3 - <<'PYEOF'
+import re, sys
+
+def patch_file(path, patterns, desc):
+    try:
+        s = open(path, encoding='utf-8', errors='surrogateescape').read()
+    except FileNotFoundError:
+        print(f"  [SKIP] {path} 不存在")
+        return
+    orig = s
+    for pat in patterns:
+        s = re.sub(pat, '', s, flags=re.S)
+    if s != orig:
+        open(path, 'w', encoding='utf-8', errors='surrogateescape').write(s)
+        print(f"  [OK] {path} ({desc})")
+    else:
+        print(f"  [!] {path} 未变化")
+
+# 1. fs/exec.c
+patch_file('fs/exec.c', [
+    r'#ifdef CONFIG_KSU\nextern int ksu_handle_execveat\([^;]*;\n(?:#ifdef CONFIG_KSU_SUSFS\n.*?#endif\n)?#endif\n',
+    r'#ifdef CONFIG_KSU_SUSFS\n\tif \(likely\(susfs_is_current_proc_umounted\(\)\)\)\n\t\tgoto orig_flow;\n.*?#elif defined\(CONFIG_KSU\)\n\t\tksu_handle_execveat\([^;]*;\n#endif\n',
+    r'[ \t]*ksu_handle_execveat(?:_sucompat)?\([^;]*;\n',
+], 'execveat')
+
+# 2. fs/open.c
+patch_file('fs/open.c', [
+    r'#ifdef CONFIG_KSU\nextern int ksu_handle_faccessat\([^;]*;\n#endif\n',
+    r'#ifdef CONFIG_KSU\n[ \t]*ksu_handle_faccessat\([^;]*;\n#endif\n',
+    r'[ \t]*ksu_handle_faccessat\([^;]*;\n',
+], 'faccessat')
+
+# 3. fs/stat.c
+patch_file('fs/stat.c', [
+    r'#ifdef CONFIG_KSU\nextern int ksu_handle_stat\([^;]*;\n(?:#ifdef CONFIG_KSU_MANUAL_HOOK\n.*?#endif\n)?#endif\n',
+    r'#ifdef CONFIG_KSU_MANUAL_HOOK\nextern void ksu_handle_(?:newfstat_ret|fstat64_ret)\([^;]*;\n#endif\n',
+    r'#ifdef CONFIG_KSU\n[ \t]*ksu_handle_stat\([^;]*;\n#endif\n',
+    r'#ifdef CONFIG_KSU_MANUAL_HOOK[^\n]*\n[ \t]*ksu_handle_(?:newfstat_ret|fstat64_ret)\([^;]*;\n#endif\n',
+    r'[ \t]*ksu_handle_(?:stat|newfstat_ret|fstat64_ret)\([^;]*;\n',
+], 'stat')
+
+# 4. fs/devpts/inode.c
+patch_file('fs/devpts/inode.c', [
+    r'#ifdef CONFIG_KSU\nextern int ksu_handle_devpts\([^;]*;\n#endif\n',
+    r'#ifdef CONFIG_KSU\n[ \t]*ksu_handle_devpts\([^;]*;\n#endif\n',
+    r'[ \t]*ksu_handle_devpts\([^;]*;\n',
+], 'devpts')
+
+# 5. kernel/sys.c
+patch_file('kernel/sys.c', [
+    r'#ifdef CONFIG_KSU\nextern int ksu_handle_setresuid\([^;]*;\n#endif\n',
+    r'#ifdef CONFIG_KSU\n[ \t]*\(void\)ksu_handle_setresuid\([^;]*;\n#endif\n',
+    r'[ \t]*\(void\)ksu_handle_setresuid\([^;]*;\n',
+], 'setresuid')
+
+# 6. fs/read_write.c
+patch_file('fs/read_write.c', [
+    r'#ifdef CONFIG_KSU_SUSFS\n\textern int ksu_handle_sys_read\([^;]*;\n.*?#endif\n',
+    r'[ \t]*ksu_handle_sys_read\([^;]*;\n',
+], 'sys_read')
+
+print("\n=== 剩余 ksu_handle 引用 ===")
+PYEOF
+          grep -rn "ksu_handle" fs/exec.c fs/open.c fs/stat.c fs/devpts/inode.c kernel/sys.c fs/read_write.c 2>/dev/null | head -10 || echo "  全部清理干净 ✅"
+
+      - name: Remove KernelSU + setup FinaSU
+        run: |
+          rm -rf KernelSU
+          git submodule deinit -f KernelSU 2>/dev/null || true
+          rm -rf .git/modules/KernelSU 2>/dev/null || true
+
+          REF="${{ github.event.inputs.finasu_ref }}"
+          [ -z "$REF" ] && REF="master"
+          echo "=== clone FinaSU ($REF) ==="
+          git clone --depth 50 -b "$REF" https://github.com/LyraVoid/FinaSU.git /tmp/FinaSU || \
+            git clone --depth 50 https://github.com/LyraVoid/FinaSU.git /tmp/FinaSU
+          cd /tmp/FinaSU && git log -1 --format='%H %s'
+
+          echo "=== 执行 setup.sh ==="
+          cd "$GITHUB_WORKSPACE"
+          bash /tmp/FinaSU/kernel/setup.sh --dir /tmp/FinaSU 2>&1 | tail -12
+          echo ""
+          echo "=== 验证 ==="
+          ls -l drivers/kernelsu | head -2
+          grep -n "kernelsu" drivers/Makefile | head -2
+          grep -n "kernelsu" drivers/Kconfig | head -2
+
+      - name: Install clang 18
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bc bison build-essential flex libssl-dev libelf-dev python3 curl cpio kmod rsync zip unzip device-tree-compiler wget
+          mkdir -p $HOME/tc && cd $HOME/tc
+          wget -q --timeout=90 --tries=3 -O clang.tar.gz "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main-kernel-build-2024/clang-r510928.tar.gz"
+          tar xzf clang.tar.gz
+          [ -x bin/clang ] && echo "$HOME/tc/bin" >> $GITHUB_PATH
+          bin/clang --version | head -1
+
+      - name: Build
+        run: |
+          DEV="${{ github.event.inputs.device }}"; [ -z "$DEV" ] && DEV=star
+          export PATH=$HOME/tc/bin:$PATH
+          echo "=== 1. defconfig ==="
+          make -j$(nproc) ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out_${DEV} ${DEV}_defconfig 2>&1 | tail -8
+
+          echo ""
+          echo "=== 2. 确认 FinaSU 配置 ==="
+          CFG=out_${DEV}/.config
+          echo "-- KSU 相关 --"
+          grep -E "^CONFIG_KSU|^# CONFIG_KSU" "$CFG" | head -20
+          echo "-- 必需项 --"
+          for k in CONFIG_KPROBES CONFIG_KALLSYMS_ALL CONFIG_EXT4_FS CONFIG_HEADERS_INSTALL; do
+            grep -E "^${k}=" "$CFG" || echo "  $k 缺失，需要补"
+          done
+
+          echo ""
+          echo "=== 3. 补必需配置（用 scripts/config）==="
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out_${DEV} scripts 2>&1 | tail -3
+          out_${DEV}/scripts/config --file out_${DEV}/.config \
+            --enable KSU --enable KPROBES --enable KALLSYMS_ALL \
+            --enable EXT4_FS --enable HEADERS_INSTALL --enable THREAD_INFO_IN_TASK
+          make -j$(nproc) ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out_${DEV} olddefconfig 2>&1 | tail -5
+
+          echo ""
+          echo "=== 4. 最终配置确认 ==="
+          grep -E "^CONFIG_KSU=|^CONFIG_KSU_HOOK|^CONFIG_KPROBES=|^CONFIG_HEADERS_INSTALL=" "$CFG"
+
+          echo ""
+          echo "=== 5. 编译（官方要求 KSU_REQUIRE_PREINIT=1）==="
+          make -j$(nproc) ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out_${DEV} \
+            KSU_REQUIRE_PREINIT=1 \
+            modules Image 2>&1 | tail -50
+
+          echo ""
+          echo "=== 6. 检查产物 ==="
+          ls -lh out_${DEV}/arch/arm64/boot/Image 2>/dev/null || echo "!!! 无 Image"
+
+      - name: Verify
+        if: always()
+        run: |
+          DEV="${{ github.event.inputs.device }}"; [ -z "$DEV" ] && DEV=star
+          IMG="out_${DEV}/arch/arm64/boot/Image"
+          if [ -f "$IMG" ]; then
+            ls -lh "$IMG"
+            strings "$IMG" | grep -m1 "Linux version 5"
+            echo "FinaSU 特征: $(strings "$IMG" | grep -ic finasu)"
+            strings "$IMG" | grep -m3 -iE "crowning manager|FinaSU" | head -5
+          else
+            echo "无 Image"
+          fi
+
+      - name: Package
+        if: always()
+        run: |
+          DEV="${{ github.event.inputs.device }}"; [ -z "$DEV" ] && DEV=star
+          IMG="out_${DEV}/arch/arm64/boot/Image"
+          if [ ! -f "$IMG" ]; then echo "跳过打包"; exit 0; fi
+          wget -q -O ak3.zip "https://github.com/osm0sis/AnyKernel3/archive/refs/heads/master.zip"
+          unzip -q ak3.zip
+          AK=$(ls -d AnyKernel3-*)
+          cp "$IMG" "$AK/Image"
+          cd "$AK"
+          sed -i "s/^kernel.string=.*/kernel.string=FinaSU-Star/g" anykernel.sh || true
+          sed -i "s/^do.devicecheck=.*/do.devicecheck=0/" anykernel.sh || true
+          sed -i "s/^block=.*/block=boot;/" anykernel.sh || true
+          sed -i "s/^is_slot_device=.*/is_slot_device=1/" anykernel.sh || true
+          zip -r9 "../FinaSU_star_AK3.zip" * -x .git README.md
+          cd ..
+          ls -lh FinaSU_star_AK3.zip
+
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: finasu-star
+          path: FinaSU_star_AK3.zip
+          retention-days: 30
+          if-no-files-found: warn
