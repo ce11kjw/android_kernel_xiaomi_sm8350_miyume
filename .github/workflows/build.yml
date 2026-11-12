@@ -1,4 +1,4 @@
-name: Build HoshinoNeko Kernel (Star)
+name: Build HoshinoNeko Kernel (Star) - Clang 18
 
 on:
   workflow_dispatch:
@@ -7,20 +7,24 @@ on:
         description: 'Device codename'
         required: true
         default: 'star'
-      ksu_ref:
-        description: 'ReSukiSU ref (empty = main HEAD)'
-        required: false
-        default: ''
+      clang_branch:
+        description: 'Clang branch'
+        required: true
+        default: 'main-kernel-build-2024'
+      clang_version:
+        description: 'Clang version'
+        required: true
+        default: 'r510928'
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 180
+    timeout-minutes: 200
 
     steps:
-      - name: Free disk space
+      - name: Free disk
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk/ndk /opt/ghc /usr/local/share/boost || true
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL || true
           df -h /
 
       - name: Checkout kernel
@@ -29,89 +33,99 @@ jobs:
           fetch-depth: 1
           submodules: false
 
-      - name: Update KernelSU to latest main
+      - name: Clone latest KernelSU
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          echo "=== 删除旧 submodule，克隆最新 ==="
           rm -rf KernelSU
-          KREF="${{ github.event.inputs.ksu_ref }}"
-          if [ -z "$KREF" ]; then KREF="main"; fi
-          echo "ref=$KREF"
-          git clone --depth 50 https://github.com/ReSukiSU/ReSukiSU.git KernelSU
-          cd KernelSU
-          if [ "$KREF" != "main" ]; then
-            git fetch --depth 50 origin "$KREF" && git checkout FETCH_HEAD
-          fi
-          echo "=== 当前 commit ==="
-          git log -1 --format='%H %s'
-          echo "=== 检查结构 ==="
-          ls
-          if [ -d kernel ] && [ -f kernel/Makefile ]; then echo "结构OK: kernel/"; else echo "警告: kernel/ 不存在"; ls -la; fi
+          git clone --depth 1 https://github.com/ReSukiSU/ReSukiSU.git KernelSU
+          cd KernelSU && git log -1 --format='%H %s'
+
+      - name: Find clang 18.1.8
+        id: findclang
+        run: |
+          # 尝试多个可能的 clang 18 位置
+          for combo in "main-kernel-build-2024 r510928" "master-kernel-build-2023 r487747c" "main-kernel r547379"; do
+            set -- $combo
+            BR=$1; VER=$2
+            URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/${BR}/clang-${VER}.tar.gz"
+            echo "尝试 $BR / $VER"
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 20 -L "$URL")
+            if [ "$CODE" = "200" ]; then
+              echo "找到: $URL"
+              echo "url=$URL" >> $GITHUB_OUTPUT
+              echo "ver=$VER" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            echo "  失败 ($CODE)"
+          done
+          echo "url=" >> $GITHUB_OUTPUT
 
       - name: Install toolchain
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq bc bison build-essential flex libssl-dev libelf-dev \
-            python3 git curl cpio kmod rsync zip unzip device-tree-compiler
-          echo "=== clang 18 ==="
-          mkdir -p $HOME/tc && cd $HOME/tc
-          curl -sL --retry 3 -o clang.tar.gz "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main-kernel-2025/clang-r547379.tar.gz"
-          if [ -s clang.tar.gz ]; then
+            python3 curl cpio kmod rsync zip unzip device-tree-compiler
+          URL="${{ steps.findclang.outputs.url }}"
+          if [ -n "$URL" ]; then
+            mkdir -p $HOME/tc && cd $HOME/tc
+            curl -sL -o clang.tar.gz "$URL"
             tar xzf clang.tar.gz
-            echo "$HOME/tc/bin" >> $GITHUB_PATH
-            echo "clang 已安装"
+            if [ -x bin/clang ]; then
+              echo "$HOME/tc/bin" >> $GITHUB_PATH
+              echo "✅ clang 安装成功: $(bin/clang --version | head -1)"
+            else
+              echo "❌ 解压后无 bin/clang"
+              sudo apt-get install -y clang-18 lld-18 llvm-18 || sudo apt-get install -y clang lld
+            fi
           else
-            echo "下载失败，用系统 clang"
+            echo "使用系统 clang"
             sudo apt-get install -y clang lld llvm
           fi
-
-      - name: Verify compiler
-        run: |
-          which clang; clang --version | head -2
+          echo "=== PATH 检查 ==="
+          export PATH=$HOME/tc/bin:$PATH
+          which clang && clang --version | head -2
 
       - name: Build kernel
         run: |
           DEV="${{ github.event.inputs.device }}"
           [ -z "$DEV" ] && DEV=star
           export PATH=$HOME/tc/bin:$PATH
-          echo "=== defconfig $DEV ==="
-          make -j$(nproc) ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out_${DEV} ${DEV}_defconfig 2>&1 | tail -20
-          echo "=== 编译 ==="
-          make -j$(nproc) ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out_${DEV} modules Image 2>&1 | tail -100
+          echo "=== compiler ==="
+          which clang; clang --version | head -2
+          echo "=== defconfig ==="
+          make -j$(nproc) ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out_${DEV} ${DEV}_defconfig 2>&1 | tail -15
+          echo "=== build ==="
+          make -j$(nproc) ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out_${DEV} modules Image 2>&1 | tail -60
 
-      - name: Show kernel version
+      - name: Show version
         run: |
-          DEV="${{ github.event.inputs.device }}"
-          [ -z "$DEV" ] && DEV=star
+          DEV="${{ github.event.inputs.device }}"; [ -z "$DEV" ] && DEV=star
           IMG="out_${DEV}/arch/arm64/boot/Image"
           ls -lh "$IMG"
-          strings "$IMG" | grep -m2 "Linux version 5"
-          echo "=== KSU 版本 ==="
-          strings "$IMG" | grep -oE "v4\.[0-9]+\.[0-9]+[a-z0-9@._-]*" | head -5
-          echo "=== SUSFS 版本 ==="
-          strings "$IMG" | grep -oE "susfs is initialized! version: v[0-9.]+" | head -2
+          strings "$IMG" | grep -m1 "Linux version 5"
+          echo "KSU: $(strings "$IMG" | grep -oE 'v4\.[0-9]+\.[0-9]+[a-z0-9@._-]*' | head -1)"
+          echo "SUSFS: $(strings "$IMG" | grep -oE 'susfs is initialized! version: v[0-9.]+' | head -1)"
 
-      - name: Package AnyKernel3
+      - name: Package
         run: |
-          DEV="${{ github.event.inputs.device }}"
-          [ -z "$DEV" ] && DEV=star
+          DEV="${{ github.event.inputs.device }}"; [ -z "$DEV" ] && DEV=star
           IMG="out_${DEV}/arch/arm64/boot/Image"
           curl -sL -o ak3.zip "https://github.com/osm0sis/AnyKernel3/archive/refs/heads/master.zip"
           unzip -q ak3.zip
           AK=$(ls -d AnyKernel3-*)
           cp "$IMG" "$AK/Image"
           cd "$AK"
-          sed -i "s/^kernel.string=.*/kernel.string=HoshinoNeko Star BakaSU/g" anykernel.sh || true
+          sed -i "s/^kernel.string=.*/kernel.string=HoshinoNeko Star BakaSU clang18/g" anykernel.sh || true
           sed -i "s/^do.devicecheck=.*/do.devicecheck=0/" anykernel.sh || true
           sed -i "s/^block=.*/block=boot;/" anykernel.sh || true
           sed -i "s/^is_slot_device=.*/is_slot_device=1/" anykernel.sh || true
-          zip -r9 "../HoshinoNeko_${DEV}_BakaSU_AnyKernel3.zip" * -x .git README.md
+          zip -r9 "../HoshinoNeko_${DEV}_clang18_AnyKernel3.zip" * -x .git README.md
           cd ..
-          ls -lh HoshinoNeko_${DEV}_BakaSU_AnyKernel3.zip
+          ls -lh HoshinoNeko_${DEV}_clang18_AnyKernel3.zip
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-${{ github.event.inputs.device }}-${{ github.run_number }}
-          path: HoshinoNeko_*_AnyKernel3.zip
+          name: kernel-${{ github.event.inputs.device }}-clang18
+          path: HoshinoNeko_*_clang18_AnyKernel3.zip
           retention-days: 30
