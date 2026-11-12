@@ -51,13 +51,18 @@ jobs:
           H="https://raw.githubusercontent.com/ce11kjw/kbuild-helper/main"
           echo "=== 下载融合脚本 ==="
           for f in ksu54-merge-p1.sh ksu54-merge-p2.sh ksu54-merge-p3.sh \
-                   patch_selinux54.py patch_sepolicy54.py patch_kbuild54.py; do
+                   patch_selinux54.py patch_sepolicy54.py patch_kbuild54.py \
+                   inject_all.py; do
             curl -sL -o "/tmp/$f" "$H/$f"
             printf "  %-28s %s bytes\n" "$f" "$(stat -c%s /tmp/$f)"
           done
           echo ""
           echo "=== P1 ==="
           bash /tmp/ksu54-merge-p1.sh "$GITHUB_WORKSPACE"
+          echo ""
+          echo "=== global compat injection (all sources) ==="
+          python3 /tmp/inject_all.py "$GITHUB_WORKSPACE"
+          echo "compat coverage: $(grep -rl 'ksu54_compat.h' drivers/kernelsu --include=*.c --include=*.h 2>/dev/null | wc -l) / $(find drivers/kernelsu -name '*.c' -o -name '*.h' 2>/dev/null | wc -l)"
           echo ""
           echo "=== P2 ==="
           bash /tmp/ksu54-merge-p2.sh "$GITHUB_WORKSPACE"
@@ -124,7 +129,11 @@ jobs:
           RC=$?
           echo "exit=$RC"
           echo "=== errors ==="
-          grep -E "error:|Error [0-9]|Stop\.|undeclared|undefined|No such" /tmp/build.log | head -30
+          grep -E "error:|Error [0-9]|Stop\.|undeclared|undefined|No such" /tmp/build.log | head -40
+          echo ""
+          echo "=== error count ==="
+          grep -c "error:" /tmp/build.log || true
+          cp /tmp/build.log build.log 2>/dev/null || true
           echo ""
           echo "=== tail ==="
           tail -15 /tmp/build.log
@@ -165,6 +174,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: finasu-merged
-          path: FinaSU_star_merged.zip
+          path: |
+            FinaSU_star_merged.zip
+            build.log
           retention-days: 30
           if-no-files-found: warn
