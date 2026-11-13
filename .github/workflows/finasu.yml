@@ -192,13 +192,11 @@ jobs:
           AK=$(ls -d AnyKernel3-*)
           cp "$IMG" "$AK/Image"
           cd "$AK"
-          sed -i 's/^kernel.string=.*/kernel.string=FinaSU-Star-5.4-merged/' anykernel.sh
-          sed -i 's/^do.devicecheck=.*/do.devicecheck=1/' anykernel.sh
-          sed -i 's/^device.name1=.*/device.name1=star/' anykernel.sh
-          sed -i 's/^block=.*/block=boot;/' anykernel.sh
-          sed -i 's/^is_slot_device=.*/is_slot_device=1/' anykernel.sh
-          sed -i 's/^do.modules=.*/do.modules=0/' anykernel.sh
-          sed -i 's/^do.systemless=.*/do.systemless=1/' anykernel.sh
+          # 用 star 专用的 anykernel.sh 覆盖模板（原模板是 Galaxy Nexus/omap，
+          # BLOCK 指向 omap_hsmmc 会导致找不到 boot 分区而 Aborting）
+          echo 'IyMjIEFueUtlcm5lbDMgUmFtZGlzayBNb2QgU2NyaXB0CiMjIG9zbTBzaXMgQCB4ZGEtZGV2ZWxvcGVycwojIyBzdGFyIChYaWFvbWkgMTEgVWx0cmEpIC0tIEZpbmFTVSA1LjQgbWVyZ2VkIGJ1aWxkCgpwcm9wZXJ0aWVzKCkgeyAnCmtlcm5lbC5zdHJpbmc9RmluYVNVLVN0YXItNS40LW1lcmdlZApkby5kZXZpY2VjaGVjaz0xCmRvLm1vZHVsZXM9MApkby5zeXN0ZW1sZXNzPTEKZG8uY2xlYW51cD0xCmRvLmNsZWFudXBvbmFib3J0PTAKZGV2aWNlLm5hbWUxPXN0YXIKZGV2aWNlLm5hbWUyPW1hcnMKZGV2aWNlLm5hbWUzPQpkZXZpY2UubmFtZTQ9CmRldmljZS5uYW1lNT0Kc3VwcG9ydGVkLnZlcnNpb25zPQpzdXBwb3J0ZWQucGF0Y2hsZXZlbHM9CnN1cHBvcnRlZC52ZW5kb3JwYXRjaGxldmVscz0KJzsgfSAjIGVuZCBwcm9wZXJ0aWVzCgpib290X2F0dHJpYnV0ZXMoKSB7CnNldF9wZXJtX3JlY3Vyc2l2ZSAwIDAgNzU1IDY0NCAkUkFNRElTSy8qOwpzZXRfcGVybV9yZWN1cnNpdmUgMCAwIDc1MCA3NTAgJFJBTURJU0svaW5pdCogJFJBTURJU0svc2JpbjsKfSAjIGVuZCBhdHRyaWJ1dGVzCgojIyBib290IHNoZWxsIHZhcmlhYmxlcwpCTE9DSz0vZGV2L2Jsb2NrL2Jvb3RkZXZpY2UvYnktbmFtZS9ib290OwpJU19TTE9UX0RFVklDRT0xOwpSQU1ESVNLX0NPTVBSRVNTSU9OPWF1dG87ClBBVENIX1ZCTUVUQV9GTEFHPWF1dG87CgouIHRvb2xzL2FrMy1jb3JlLnNoOwoKZHVtcF9ib290Owp3cml0ZV9ib290OwojIyBlbmQgYm9vdCBpbnN0YWxsCg==' | base64 -d > anykernel.sh
+          echo "=== anykernel.sh ==="
+          grep -E "^BLOCK=|^IS_SLOT_DEVICE=|^device.name1=|^do.devicecheck=" anykernel.sh
           zip -r9 ../FinaSU_star_merged.zip . -x ".git/*" "README.md"
           cd ..
           ls -lh FinaSU_star_merged.zip
