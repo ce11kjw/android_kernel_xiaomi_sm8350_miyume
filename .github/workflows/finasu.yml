@@ -54,7 +54,9 @@ jobs:
           for f in ksu54-merge-p1.sh ksu54-merge-p2.sh ksu54-merge-p3.sh \
                    patch_selinux54.py patch_sepolicy54.py patch_kbuild54.py \
                    patch_hide54.py patch_dup54.py inject_all.py \
-                   fix_all_v12.py fix_v15.py enable_hide54.py; do
+                   fix_all_v12.py fix_v15.py enable_hide54.py \
+                   fix_deadlock.py fix_avc.py fix_sufb.py \
+                   patch_oracle4g.py; do
             curl -sL -o "/tmp/$f" "$H/$f"
             printf "  %-26s %s\n" "$f" "$(stat -c%s /tmp/$f)"
           done
@@ -88,6 +90,22 @@ jobs:
           python3 /tmp/enable_hide54.py "$GITHUB_WORKSPACE"
 
           echo ""
+          echo "=== 修 kfree-static + self-deadlock（审计确认的确定性崩溃）==="
+          python3 /tmp/fix_deadlock.py "$GITHUB_WORKSPACE"
+
+          echo ""
+          echo "=== avc notif 降噪（防 ring buffer 刷爆）==="
+          python3 /tmp/fix_avc.py "$GITHUB_WORKSPACE"
+
+          echo ""
+          echo "=== su -> /system/bin/sh fallback（ksud 缺失时能拿 root）==="
+          python3 /tmp/fix_sufb.py "$GITHUB_WORKSPACE"
+
+          echo ""
+          echo "=== step4g: native-type oracle filter（反 context/avd 探测）==="
+          python3 /tmp/patch_oracle4g.py "$GITHUB_WORKSPACE"
+
+          echo ""
           echo "=== P3 ==="
           if [ "${{ github.event.inputs.enable_preinit }}" = "1" ]; then
             KSU54_ENABLE_PREINIT=1 bash /tmp/ksu54-merge-p3.sh "$GITHUB_WORKSPACE"
@@ -108,6 +126,12 @@ jobs:
           printf "  %-26s " "seqno saved"; test "$(grep -c '__ksu54_seqno = ksu54' $S/selinux/rules.c)" = "2" && echo YES || echo NO
           printf "  %-26s " "hide guards flipped"; test "$(grep -c 'ifdef CONFIG_KSU_SUSFS' $S/feature/selinux_hide.c)" = "0" && echo YES || echo NO
           printf "  %-26s " "hide 5.4 backend"; grep -q 'ksu54_selinux_hide_54' $S/feature/selinux_hide.c && echo YES || echo NO
+          printf "  %-26s " "kfree-static guard"; grep -q 'ksu54_rules_fix' $S/selinux/rules.c && echo YES || echo NO
+          printf "  %-26s " "deadlock guard"; grep -q 'ksu54_status_guard' $S/selinux/rules.c && echo YES || echo NO
+          printf "  %-26s " "avc ratelimit"; grep -q 'avc54_notif_ratelimit' security/selinux/avc.c && echo YES || echo NO
+          printf "  %-26s " "su fallback"; grep -q 'VENUS_SU_FALLBACK' $S/feature/sucompat.c && echo YES || echo NO
+          printf "  %-26s " "oracle 4g"; grep -q 'ksu54_context_is_foreign' $S/selinux/rules.c && echo YES || echo NO
+          printf "  %-26s " "snapshot call"; grep -q 'ksu54_snapshot_native_types();' $S/selinux/rules.c && echo YES || echo NO
           printf "  %-26s " "dynamic manager cfg"; grep -q 'KSU_DYNAMIC_MANAGER' .github/workflows/finasu.yml && echo YES || echo NO
           printf "  %-26s " "no bad lvalue"; test "$(grep -cE '^\s*ksu54_pol_get_granting\([a-z_]+\)\s*=' $S/selinux/rules.c)" = "0" && echo YES || echo NO
           printf "  %-26s " "no raw granting"; test "$(cat $S/selinux/rules.c $S/feature/selinux_hide.c $S/selinux/sepolicy.c | grep -c '->latest_granting')" = "0" && echo YES || echo NO
@@ -170,6 +194,35 @@ jobs:
             O="$O" headers_install INSTALL_HDR_PATH="$(pwd)/$O/usr" 2>&1 | tail -3
           echo "objtree usr/include: $(find "$O/usr/include" -type f 2>/dev/null | wc -l) files"
           ls -l "$O/usr/include/linux/unistd.h" 2>&1 || echo "::error::unistd.h MISSING -> preinit will be disabled"
+
+          # flask.h 由 security/selinux 目录构建时才生成，但 kernelsu 的 objsec.h
+          # 会 include 它。并行编译下 kernelsu 可能先于 selinux 编译 -> 找不到
+          # flask.h。先单独生成，消除竞态。
+          echo "=== pre-generate flask.h (avoid parallel build race) ==="
+          make -j"$(nproc)" ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip LLVM_IAS=1 \
+            O="$O" security/selinux/flask.h 2>&1 | tail -3 \
+            || make -j"$(nproc)" ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm \
+                 OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip LLVM_IAS=1 \
+                 O="$O" security/selinux/ 2>&1 | tail -3
+          ls -l "$O/security/selinux/flask.h" 2>&1 || echo "::warning::flask.h not pre-generated"
+
+          # Fast gate: 先只编 KSU 对象。若这里就失败，立刻暴露，不必等 50 分钟全量。
+          echo "=== gate: build KSU objects only ==="
+          set +e
+          make -j"$(nproc)" ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip LLVM_IAS=1 \
+            O="$O" KSU_REQUIRE_PREINIT=1 drivers/kernelsu/ > /tmp/gate.log 2>&1
+          GRC=$?
+          set -e
+          echo "gate exit=$GRC"
+          if [ "$GRC" -ne 0 ]; then
+            echo "=== gate errors ==="
+            grep -E "error:|Error [0-9]|No such" /tmp/gate.log | head -20
+            tail -10 /tmp/gate.log
+          else
+            echo "gate: PASS (KSU objects built)"
+          fi
 
       - name: Build
         run: |
