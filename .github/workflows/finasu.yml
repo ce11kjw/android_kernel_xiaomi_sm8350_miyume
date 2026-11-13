@@ -54,7 +54,7 @@ jobs:
           for f in ksu54-merge-p1.sh ksu54-merge-p2.sh ksu54-merge-p3.sh \
                    patch_selinux54.py patch_sepolicy54.py patch_kbuild54.py \
                    patch_hide54.py patch_dup54.py inject_all.py \
-                   fix_all_v12.py fix_v15.py; do
+                   fix_all_v12.py fix_v15.py enable_hide54.py; do
             curl -sL -o "/tmp/$f" "$H/$f"
             printf "  %-26s %s\n" "$f" "$(stat -c%s /tmp/$f)"
           done
@@ -84,6 +84,10 @@ jobs:
           python3 /tmp/fix_v15.py "$GITHUB_WORKSPACE"
 
           echo ""
+          echo "=== 真正启用 selinux_hide（反转 SUSFS 短路 + 5.4 原生后端）==="
+          python3 /tmp/enable_hide54.py "$GITHUB_WORKSPACE"
+
+          echo ""
           echo "=== P3 ==="
           if [ "${{ github.event.inputs.enable_preinit }}" = "1" ]; then
             KSU54_ENABLE_PREINIT=1 bash /tmp/ksu54-merge-p3.sh "$GITHUB_WORKSPACE"
@@ -102,6 +106,9 @@ jobs:
           printf "  %-26s " "view guard"; grep -q 'KSU54_POL_IS_OWNED' $S/selinux/sepolicy.c && echo YES || echo NO
           printf "  %-26s " "double-free guard"; grep -q 'pol = NULL' $S/selinux/rules.c && echo YES || echo NO
           printf "  %-26s " "seqno saved"; test "$(grep -c '__ksu54_seqno = ksu54' $S/selinux/rules.c)" = "2" && echo YES || echo NO
+          printf "  %-26s " "hide guards flipped"; test "$(grep -c 'ifdef CONFIG_KSU_SUSFS' $S/feature/selinux_hide.c)" = "0" && echo YES || echo NO
+          printf "  %-26s " "hide 5.4 backend"; grep -q 'ksu54_selinux_hide_54' $S/feature/selinux_hide.c && echo YES || echo NO
+          printf "  %-26s " "dynamic manager cfg"; grep -q 'KSU_DYNAMIC_MANAGER' .github/workflows/finasu.yml && echo YES || echo NO
           printf "  %-26s " "no bad lvalue"; test "$(grep -cE '^\s*ksu54_pol_get_granting\([a-z_]+\)\s*=' $S/selinux/rules.c)" = "0" && echo YES || echo NO
           printf "  %-26s " "no raw granting"; test "$(cat $S/selinux/rules.c $S/feature/selinux_hide.c $S/selinux/sepolicy.c | grep -c '->latest_granting')" = "0" && echo YES || echo NO
           printf "  %-26s " "policy shim order"; sed -n '/^struct selinux_policy {/,/};/p' $S/selinux/sepolicy.h | tr -d '\t' | tr '\n' ' '
@@ -140,6 +147,7 @@ jobs:
 
           if [ "$SUSFS" = "1" ]; then
             ./scripts/config --file "$CFG" \
+              --enable KSU_DYNAMIC_MANAGER \
               --enable KSU_SUSFS --enable KSU_SUSFS_SUS_PATH \
               --enable KSU_SUSFS_SUS_MOUNT --enable KSU_SUSFS_SUS_KSTAT \
               --enable KSU_SUSFS_SPOOF_UNAME --enable KSU_SUSFS_ENABLE_LOG \
@@ -154,8 +162,14 @@ jobs:
           grep -E "^CONFIG_KSU=|^CONFIG_THREAD_INFO_IN_TASK=|^CONFIG_KPROBES=" "$CFG" || echo MISS
           grep -E "^CONFIG_KSU_SUSFS" "$CFG" || echo "SUSFS OFF"
 
-          make -j"$(nproc)" ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip LLVM_IAS=1 O="$O" headers_install INSTALL_HDR_PATH="$(pwd)/usr" 2>&1 | tail -3
-          echo "usr/include: $(find usr/include -type f 2>/dev/null | wc -l)"
+          # FinaSU 的 Kbuild 检查 $(objtree)/usr/include/linux/unistd.h 来决定是否编译
+          # preinit。INSTALL_HDR_PATH 必须是 objtree 才对得上，否则 preinit 被静默跳过，
+          # init 的 selinux_setup 阶段没有 KSU 介入 -> 卡第一屏。
+          make -j"$(nproc)" ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip LLVM_IAS=1 \
+            O="$O" headers_install INSTALL_HDR_PATH="$(pwd)/$O/usr" 2>&1 | tail -3
+          echo "objtree usr/include: $(find "$O/usr/include" -type f 2>/dev/null | wc -l) files"
+          ls -l "$O/usr/include/linux/unistd.h" 2>&1 || echo "::error::unistd.h MISSING -> preinit will be disabled"
 
       - name: Build
         run: |
@@ -164,13 +178,21 @@ jobs:
           export PATH="$HOME/tc/bin:$PATH"
           O="out_${DEV}"
           set +e
-          make -j"$(nproc)" ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip LLVM_IAS=1 O="$O" KSU_REQUIRE_PREINIT=1 modules Image > /tmp/build.log 2>&1
+          # KSU_REQUIRE_PREINIT 用环境变量导出，确保 Kbuild 的 ifeq 看得到
+          export KSU_REQUIRE_PREINIT=1
+          make -j"$(nproc)" ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip LLVM_IAS=1 \
+            O="$O" modules Image > /tmp/build.log 2>&1
           RC=$?
           echo "exit=$RC"
           echo "=== error count ==="
           grep -c "error:" /tmp/build.log || true
           echo "=== errors ==="
           grep "error:" /tmp/build.log | head -40
+          echo ""
+          echo "=== preinit check ==="
+          grep -c "preinit" /tmp/build.log 2>/dev/null || true
+          grep -E "preinit disabled|UAPI headers missing" /tmp/build.log 2>/dev/null || echo "preinit: no skip warning (good)"
           echo ""
           ls -lh "$O/arch/arm64/boot/Image" 2>/dev/null || echo NO_IMAGE
           cp /tmp/build.log build.log 2>/dev/null || true
@@ -186,6 +208,8 @@ jobs:
           ls -lh "$IMG"
           strings "$IMG" | grep -m1 "Linux version 5"
           echo "SUSFS strings: $(strings "$IMG" | grep -ic susfs)"
+          echo "preinit strings : $(strings "$IMG" | grep -c 'preinit')"
+          echo "selinux_setup   : $(strings "$IMG" | grep -c 'selinux_setup')  (must be >0)"
           echo ""
           wget -q -O ak3.zip "https://github.com/osm0sis/AnyKernel3/archive/refs/heads/master.zip"
           unzip -q ak3.zip
