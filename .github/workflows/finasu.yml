@@ -112,15 +112,16 @@ jobs:
           printf "  %-26s " "preinit disabled"; grep -q 'KSU_NO_PREINIT' $S/Kbuild && echo YES || echo NO
           printf "  %-26s " "compat coverage"; echo "$(grep -rl 'ksu54_compat.h' $S --include=*.c --include=*.h | wc -l) files"
 
-      - name: Install clang 18
+      - name: Install clang (Ubuntu apt, matches working kernels)
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq bc bison build-essential flex libssl-dev libelf-dev python3 curl cpio kmod rsync zip unzip device-tree-compiler wget
-          mkdir -p "$HOME/tc"
-          cd "$HOME/tc"
-          wget -q --timeout=120 --tries=3 -O clang.tar.gz "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main-kernel-build-2024/clang-r510928.tar.gz"
-          tar xzf clang.tar.gz
-          if [ -x bin/clang ]; then echo "$HOME/tc/bin" >> "$GITHUB_PATH"; bin/clang --version | head -1; fi
+          sudo apt-get install -y -qq bc bison build-essential flex libssl-dev libelf-dev python3 curl cpio kmod rsync zip unzip device-tree-compiler wget clang lld llvm
+          echo "=== clang ==="
+          clang --version | head -2
+          echo "=== lld ==="
+          ld.lld --version | head -1
+          echo "=== which ==="
+          which clang ld.lld llvm-ar llvm-objcopy llvm-nm llvm-strip
 
       - name: Defconfig + SUSFS + headers
         run: |
@@ -131,7 +132,7 @@ jobs:
           O="out_${DEV}"
           CFG="$O/.config"
 
-          make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 O="$O" "${DEV}_defconfig" 2>&1 | tail -5
+          make -j"$(nproc)" ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip LLVM_IAS=1 O="$O" "${DEV}_defconfig" 2>&1 | tail -5
 
           ./scripts/config --file "$CFG" \
             --enable KSU --enable KPROBES --enable KALLSYMS_ALL \
@@ -147,13 +148,13 @@ jobs:
               --enable KSU_SUSFS_OPEN_REDIRECT --enable KSU_SUSFS_SUS_MAP
           fi
 
-          make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 O="$O" olddefconfig 2>&1 | tail -2
+          make -j"$(nproc)" ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip LLVM_IAS=1 O="$O" olddefconfig 2>&1 | tail -2
 
           echo "=== config ==="
           grep -E "^CONFIG_KSU=|^CONFIG_THREAD_INFO_IN_TASK=|^CONFIG_KPROBES=" "$CFG" || echo MISS
           grep -E "^CONFIG_KSU_SUSFS" "$CFG" || echo "SUSFS OFF"
 
-          make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 O="$O" headers_install INSTALL_HDR_PATH="$(pwd)/usr" 2>&1 | tail -3
+          make -j"$(nproc)" ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip LLVM_IAS=1 O="$O" headers_install INSTALL_HDR_PATH="$(pwd)/usr" 2>&1 | tail -3
           echo "usr/include: $(find usr/include -type f 2>/dev/null | wc -l)"
 
       - name: Build
@@ -163,7 +164,7 @@ jobs:
           export PATH="$HOME/tc/bin:$PATH"
           O="out_${DEV}"
           set +e
-          make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 O="$O" KSU_REQUIRE_PREINIT=1 modules Image > /tmp/build.log 2>&1
+          make -j"$(nproc)" ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip LLVM_IAS=1 O="$O" KSU_REQUIRE_PREINIT=1 modules Image > /tmp/build.log 2>&1
           RC=$?
           echo "exit=$RC"
           echo "=== error count ==="
