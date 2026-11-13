@@ -53,7 +53,8 @@ jobs:
           echo "=== fetch scripts ==="
           for f in ksu54-merge-p1.sh ksu54-merge-p2.sh ksu54-merge-p3.sh \
                    patch_selinux54.py patch_sepolicy54.py patch_kbuild54.py \
-                   patch_hide54.py patch_dup54.py inject_all.py; do
+                   patch_hide54.py patch_dup54.py inject_all.py \
+                   fix_all_v12.py fix_v15.py; do
             curl -sL -o "/tmp/$f" "$H/$f"
             printf "  %-26s %s\n" "$f" "$(stat -c%s /tmp/$f)"
           done
@@ -78,6 +79,11 @@ jobs:
           python3 /tmp/patch_sepolicy54.py "$GITHUB_WORKSPACE"
 
           echo ""
+          echo "=== 审查修正（7 个缺陷）==="
+          python3 /tmp/fix_all_v12.py "$GITHUB_WORKSPACE"
+          python3 /tmp/fix_v15.py "$GITHUB_WORKSPACE"
+
+          echo ""
           echo "=== P3 ==="
           if [ "${{ github.event.inputs.enable_preinit }}" = "1" ]; then
             KSU54_ENABLE_PREINIT=1 bash /tmp/ksu54-merge-p3.sh "$GITHUB_WORKSPACE"
@@ -91,6 +97,13 @@ jobs:
           echo "--- key checks ---"
           printf "  %-26s " "selinux_hide ported"; grep -q 'KSU54_HAVE_POLICY_VIEW' $S/feature/selinux_hide.c && echo YES || echo NO
           printf "  %-26s " "sidtab dup"; grep -q 'ksu54_sidtab_dup' $S/selinux/sepolicy.h && echo YES || echo NO
+          printf "  %-26s " "sidtab deep copy"; grep -q 'context_cpy' $S/selinux/sepolicy.h && echo YES || echo NO
+          printf "  %-26s " "granting accessor"; grep -q 'ksu54_pol_get_granting' $S/selinux/sepolicy.h && echo YES || echo NO
+          printf "  %-26s " "view guard"; grep -q 'KSU54_POL_IS_OWNED' $S/selinux/sepolicy.c && echo YES || echo NO
+          printf "  %-26s " "double-free guard"; grep -q 'pol = NULL' $S/selinux/rules.c && echo YES || echo NO
+          printf "  %-26s " "seqno saved"; test "$(grep -c '__ksu54_seqno = ksu54' $S/selinux/rules.c)" = "2" && echo YES || echo NO
+          printf "  %-26s " "no bad lvalue"; test "$(grep -cE '^\s*ksu54_pol_get_granting\([a-z_]+\)\s*=' $S/selinux/rules.c)" = "0" && echo YES || echo NO
+          printf "  %-26s " "no raw granting"; test "$(cat $S/selinux/rules.c $S/feature/selinux_hide.c $S/selinux/sepolicy.c | grep -c '->latest_granting')" = "0" && echo YES || echo NO
           printf "  %-26s " "policy shim order"; sed -n '/^struct selinux_policy {/,/};/p' $S/selinux/sepolicy.h | tr -d '\t' | tr '\n' ' '
           echo ""
           printf "  %-26s " "policy shadow"; grep -q 'KSU54_POLICY_FIELD' $S/selinux/rules.c && echo YES || echo NO
