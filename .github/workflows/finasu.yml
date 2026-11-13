@@ -193,7 +193,37 @@ jobs:
             OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip LLVM_IAS=1 \
             O="$O" headers_install INSTALL_HDR_PATH="$(pwd)/$O/usr" 2>&1 | tail -3
           echo "objtree usr/include: $(find "$O/usr/include" -type f 2>/dev/null | wc -l) files"
-          ls -l "$O/usr/include/linux/unistd.h" 2>&1 || echo "::error::unistd.h MISSING -> preinit will be disabled"
+
+          # 这个 QGKI vendor 树的 headers_install 只装了 camera/ 等显式列出的目录，
+          # 没有 usr/include/linux/unistd.h。而 FinaSU 的 Kbuild 用
+          #   $(wildcard $(objtree)/usr/include/linux/unistd.h)
+          # 判断是否编译 preinit。缺了它 preinit 会被静默跳过 ->
+          # init 的 selinux_setup 阶段没有 KSU 介入 -> 卡第一屏。
+          # 修法：补齐 preinit runner 真正需要的 UAPI 头（unistd + 全部 asm 架构头）。
+          if [ ! -f "$O/usr/include/linux/unistd.h" ]; then
+            echo "::warning::usr/include/linux/unistd.h missing; installing UAPI headers manually"
+            mkdir -p "$O/usr/include/linux" "$O/usr/include/asm" "$O/usr/include/asm-generic"
+            cp -f include/uapi/linux/unistd.h "$O/usr/include/linux/unistd.h" 2>/dev/null || true
+            # asm/unistd.h 在 out/ 的 generated 目录里
+            for cand in \
+              "$O/arch/arm64/include/generated/uapi/asm/unistd.h" \
+              "$O/arch/arm64/include/generated/uapi/asm/unistd_64.h" \
+              "arch/arm64/include/generated/uapi/asm/unistd.h"; do
+              [ -f "$cand" ] && cp -f "$cand" "$O/usr/include/asm/" 2>/dev/null || true
+            done
+            # 兜底：整个 generated/uapi/asm 拷过去
+            if [ -d "$O/arch/arm64/include/generated/uapi/asm" ]; then
+              cp -f "$O/arch/arm64/include/generated/uapi/asm/"*.h "$O/usr/include/asm/" 2>/dev/null || true
+            fi
+            # asm-generic
+            if [ -d "include/uapi/asm-generic" ]; then
+              cp -f include/uapi/asm-generic/*.h "$O/usr/include/asm-generic/" 2>/dev/null || true
+            fi
+          fi
+
+          echo "=== unistd check ==="
+          ls -l "$O/usr/include/linux/unistd.h" 2>&1 || echo "::error::unistd.h STILL MISSING -> preinit will be disabled"
+          ls "$O/usr/include/asm/unistd.h" 2>&1 || echo "::warning::asm/unistd.h missing"
 
           # flask.h 由 security/selinux 目录构建时才生成，但 kernelsu 的 objsec.h
           # 会 include 它。并行编译下 kernelsu 可能先于 selinux 编译 -> 找不到
